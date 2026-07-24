@@ -1,0 +1,181 @@
+import { Component, ChangeDetectionStrategy, ChangeDetectorRef } from '@angular/core';
+import { ICellRendererAngularComp } from 'ag-grid-angular';
+import { ICellRendererParams } from 'ag-grid-community';
+import {
+  ROUTE_COUNT_META,
+  RouteCountKey
+} from './execution-status.constants';
+import {
+  RouteExecutionSummary,
+  buildRouteSummaryFromRow
+} from './job-execution.model';
+
+interface RouteCircle {
+  key: RouteCountKey;
+  label: string;
+  count: number;
+  cssClass: string;
+}
+
+/**
+ * Renders the "Route" column of the Job List grid.
+ *
+ * Shows the number of dispatcher executions for the job followed by one
+ * coloured circle per non-empty process bucket (Terminated / Running /
+ * Waiting / Error) with the count inside.
+ *
+ * Source of the counts, in priority order:
+ *   1. `ROUTE_EXEC_SUMMARY` — set by the component after a row is expanded,
+ *      derived from the live executions call.
+ *   2. The flat `EXEC_COUNT` / `CNT_*` columns from the job list query.
+ *
+ * This means the circles paint on first load from SQL, then refresh with
+ * live values if the user expands the row.
+ */
+@Component({
+  selector: 'app-route-executions-badge',
+  standalone: false,
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  template: `
+    <div class="route-cell" *ngIf="hasSummary; else emptyCell" [title]="summaryTitle">
+      <span class="route-total">
+        <coras-icon class="route-total-icon">neo_flow</coras-icon>
+        <span class="route-total-count">{{ total }}</span>
+      </span>
+
+      <span class="route-circles">
+        <span
+          *ngFor="let circle of circles; trackBy: trackByKey"
+          class="route-circle"
+          [ngClass]="circle.cssClass"
+          [attr.aria-label]="circle.label + ': ' + circle.count"
+          [title]="circle.label + ': ' + circle.count">
+          {{ circle.count }}
+        </span>
+      </span>
+    </div>
+
+    <ng-template #emptyCell>
+      <span class="route-empty" title="No dispatcher executions">&ndash;</span>
+    </ng-template>
+  `,
+  styles: [`
+    :host {
+      display: block;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .route-cell {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 100%;
+      overflow: hidden;
+    }
+
+    .route-total {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      flex: 0 0 auto;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--grey-08, #455a64);
+    }
+
+    .route-total-icon {
+      font-size: 12px !important;
+      line-height: 1;
+    }
+
+    .route-circles {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex: 0 0 auto;
+    }
+
+    .route-circle {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 4px;
+      border-radius: 9px;
+      font-size: 10px;
+      font-weight: 700;
+      line-height: 1;
+      color: #ffffff;
+      flex: 0 0 auto;
+    }
+
+    .route-circle-green  { background-color: var(--success-05, #1e7e34); }
+    .route-circle-orange { background-color: var(--warning-05, #b06000); }
+    .route-circle-amber  { background-color: var(--warning-04, #d99100); }
+    .route-circle-red    { background-color: var(--error-05, #c62828); }
+
+    .route-empty {
+      color: var(--grey-06, #90a4ae);
+      font-size: 12px;
+    }
+  `]
+})
+export class RouteExecutionsBadgeComponent implements ICellRendererAngularComp {
+
+  circles: RouteCircle[] = [];
+  total = 0;
+  hasSummary = false;
+  summaryTitle = '';
+
+  constructor(private readonly cdr: ChangeDetectorRef) { }
+
+  agInit(params: ICellRendererParams): void {
+    this.build(params);
+  }
+
+  refresh(params: ICellRendererParams): boolean {
+    this.build(params);
+    this.cdr.markForCheck();
+    return true;
+  }
+
+  trackByKey = (_: number, circle: RouteCircle) => circle.key;
+
+  private build(params: ICellRendererParams): void {
+    const data: any = params?.data ?? {};
+
+    // Live summary set after expansion wins; otherwise derive from SQL columns.
+    const summary: RouteExecutionSummary | undefined =
+      data.ROUTE_EXEC_SUMMARY ?? buildRouteSummaryFromRow(data);
+
+    if (!summary || summary.total <= 0) {
+      this.hasSummary = false;
+      this.circles = [];
+      this.total = 0;
+      this.summaryTitle = '';
+      return;
+    }
+
+    this.total = summary.total;
+    this.circles = ROUTE_COUNT_META
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map(meta => ({
+        key: meta.key,
+        label: meta.label,
+        count: summary.counts?.[meta.key] ?? 0,
+        cssClass: meta.cssClass
+      }))
+      .filter(circle => circle.count > 0);
+
+    this.hasSummary = true;
+
+    const breakdown = this.circles.length
+      ? this.circles.map(c => `${c.label}: ${c.count}`).join(', ')
+      : 'no process detail';
+    this.summaryTitle = `${this.total} execution(s) — ${breakdown}`;
+  }
+}
