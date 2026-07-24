@@ -1,0 +1,43 @@
+{{- if .Values.persistence.enabled }}
+# =============================================================================
+#  PersistentVolumeClaim for Release Guardian runtime configuration.
+#
+#  Holds the files the app writes at runtime from the Check-config tab:
+#    subject-checks.json        checkpoint-overrides.json
+#    status-overrides.json      env-links.json
+#    artifacts.json
+#
+#  Without this the files live on the container filesystem and are wiped on
+#  every pod restart/recreation, which is why config kept reverting to the
+#  packaged defaults.
+#
+#  NOTE: the claim name MUST match the claimName used by the deployment's
+#  "cockpit-config" volume: {{ .Values.app.name }}-config
+# =============================================================================
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.app.name }}-config
+  namespace: {{ .Values.app.namespace }}
+  labels:
+    app: {{ .Values.app.name }}
+    appcode: {{ .Values.app.appcode }}
+    tier: {{ .Values.app.tier }}
+    environment: {{ .Values.app.env }}
+  annotations:
+    # Keep the data if the Helm release is uninstalled — config is hand-curated
+    # and should not be destroyed by a chart removal.
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    # ReadWriteOnce is fine for a single replica. If you ever run more than one
+    # replica you MUST switch to ReadWriteMany, otherwise only the first pod can
+    # mount the volume and the rest fail to start.
+    - {{ .Values.persistence.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size | default "128Mi" }}
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass }}
+  {{- end }}
+{{- end }}

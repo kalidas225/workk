@@ -1,0 +1,32 @@
+# =============================================================================
+#  MERGE THESE KEYS INTO YOUR EXISTING values.yaml (values-default.yaml).
+#  They are the only new values the corrected deployment.yaml / pvc-config.yaml
+#  templates need. Everything else in your chart stays exactly as it is.
+# =============================================================================
+
+app:
+  # Where Release Guardian stores runtime-editable configuration inside the
+  # container. Must match the mountPath of the "cockpit-config" volume — the
+  # templates already reference this single value for both, so changing it here
+  # changes both consistently.
+  configDir: /data/config
+
+persistence:
+  # true  -> a PVC is created and mounted; config survives pod recreation.
+  # false -> an emptyDir is used instead; the deployment applies cleanly but
+  #          config is LOST when the pod is recreated. Only use false if you
+  #          cannot get a PVC yet.
+  enabled: true
+
+  # Tiny — these are a handful of small JSON files.
+  size: 128Mi
+
+  # ReadWriteOnce is correct for replicaCount: 1.
+  # If deployment.spec.replicaCount > 1 you MUST use ReadWriteMany AND a storage
+  # class that supports it, otherwise only one pod will start.
+  accessMode: ReadWriteOnce
+
+  # Set to a storage class that exists in your cluster. Leave empty/commented to
+  # use the cluster default. Check what is available with:
+  #   kubectl get storageclass
+  storageClass: ""

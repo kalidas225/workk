@@ -1,0 +1,173 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.app.name }}-deployment
+  namespace: {{ .Values.app.namespace }}
+  labels:
+    app: {{ .Values.app.name }}
+    appcode: {{ .Values.app.appcode }}
+    tier: {{ .Values.app.tier }}
+    opscontact: {{ .Values.app.opscontact }}
+    environment: {{ .Values.app.env }}
+    cl_do_not_ingest : {{ .Values.app.clddonotingest | default "false" | quote }}
+spec:
+  replicas: {{ .Values.deployment.spec.replicaCount }}
+  revisionHistoryLimit: {{ .Values.deployment.spec.revisionHistoryLimit }}
+  # ---------------------------------------------------------------------------
+  # ADDITION 3 of 4 — rollout strategy.
+  # A ReadWriteOnce PVC can only be attached to ONE pod at a time. The default
+  # RollingUpdate briefly runs the new pod alongside the old one, so the new pod
+  # gets stuck in ContainerCreating ("Multi-Attach error"). Recreate stops the
+  # old pod first. Only needed while persistence.accessMode is ReadWriteOnce.
+  # ---------------------------------------------------------------------------
+  {{- if and .Values.persistence.enabled (eq (.Values.persistence.accessMode | default "ReadWriteOnce") "ReadWriteOnce") }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      app: {{ .Values.app.name }}
+      appcode: {{ .Values.app.appcode }}
+      tier: {{ .Values.app.tier }}
+      opscontact: {{ .Values.app.opscontact }}
+      environment: {{ .Values.app.env }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.app.name }}
+        appcode: {{ .Values.app.appcode }}
+        tier: {{ .Values.app.tier }}
+        opscontact: {{ .Values.app.opscontact }}
+        environment: {{ .Values.app.env }}
+        cl_do_not_ingest : {{ .Values.app.clddonotingest | default "false" | quote }}
+      annotations:
+        com.illumio.app: {{ .Values.deployment.annotations.app }}
+        com.illumio.env: {{ .Values.deployment.annotations.env }}
+        com.illumio.loc: {{ .Values.deployment.annotations.loc }}
+        com.illumio.role: {{ .Values.deployment.annotations.role }}
+        com.illumio.app-tiers: {{ .Values.deployment.annotations.tiers }}
+        com.illumio.middleware: {{ .Values.deployment.annotations.middleware }}
+    spec:
+      dnsConfig:
+        searches:
+          - net.intra
+          - fr.net.intra
+          - fra.net.intra
+      containers:
+        - name: {{ .Values.app.name }}-sidecar
+          image: {{ .Values.deployment.containers.imageRegistry }}/{{ .Values.deployment.containers.registry_ecosystem }}/httpd:2.4.6-4
+          imagePullPolicy: Always
+          env:
+            - name: TZ
+              value: Europe/Paris
+          ports:
+            - name: http
+              containerPort: {{ .Values.container.port.https }}
+              protocol: TCP
+          resources:
+            limits:
+              cpu: 120m
+              memory: 120Mi
+            requests:
+              cpu: 10m
+              memory: 60Mi
+          volumeMounts:
+            - name: sidecar-config
+              mountPath: /etc/httpd/conf
+            - name: sidecar-autosign
+              mountPath: /etc/httpd/ssl
+            - name: sidecar-cmd
+              mountPath: /usr/sbin/run-httpd.sh
+              subPath: run-httpd.sh
+            - name: run-httpd
+              mountPath: /run/httpd
+            - name: bnppca
+              mountPath: /etc/httpd/ca
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 48
+        - name: {{ .Values.app.name }}
+          image: "{{ .Values.deployment.containers.image }}:{{ .Values.appImageVersion }}"
+          imagePullPolicy: {{ .Values.deployment.containers.imagePullPolicy }}
+          ports:
+            - containerPort: {{ .Values.deployment.containers.containerPort }}
+          env:
+            - name: TZ
+              value: Europe/Paris
+            - name: SPRING_PROFILES_ACTIVE
+              value: {{.Values.app.spring.profile}}
+            # -----------------------------------------------------------------
+            # ADDITION 1 of 4 — tell the app WHERE to store runtime config.
+            # Without this it falls back to a relative "config" dir, which
+            # resolves to the container's home (/home/default/config) and is
+            # NOT writable -> every Check-config edit is lost on restart.
+            # -----------------------------------------------------------------
+            - name: COCKPIT_CONFIG_DIR
+              value: {{ .Values.app.configDir | default "/data/config" }}
+          resources:
+            requests:
+              cpu: {{ .Values.deployment.containers.requests.cpu }}
+              memory: {{ .Values.deployment.containers.requests.memory }}
+            limits:
+              cpu: {{ .Values.deployment.containers.limits.cpu }}
+              memory: {{ .Values.deployment.containers.limits.memory }}
+          volumeMounts:
+            - name: logs
+              mountPath: /usr/local/instances/logs/
+            - name: run
+              mountPath: /var/run/
+            # -----------------------------------------------------------------
+            # ADDITION 2 of 4 — mount the config volume at the SAME path as
+            # COCKPIT_CONFIG_DIR above. (This mount is what your failing sync
+            # referred to as containers[1].volumeMounts[2].)
+            # -----------------------------------------------------------------
+            - name: cockpit-config
+              mountPath: {{ .Values.app.configDir | default "/data/config" }}
+      volumes:
+        - name: bnppca
+          secret:
+            secretName: {{ .Values.app.name }}-certificates-ca
+        - name: sidecar-config
+          configMap:
+            name: "{{ .Values.app.name }}-sidecar-cfg"
+        - name: run-httpd
+          emptyDir: {}
+        - name: sidecar-autosign
+          emptyDir: {}
+        - name: sidecar-cmd
+          configMap:
+            name: "{{ .Values.app.name }}-sidecar-cmd"
+            defaultMode: 0777
+        - name: logs
+          emptyDir: {}
+        - name: run
+          emptyDir: {}
+        # ---------------------------------------------------------------------
+        # ADDITION 4 of 4 — THE MISSING PIECE that caused your sync failure:
+        #   Deployment ... is invalid: spec.template.spec.containers[1]
+        #   .volumeMounts[2].name: Not found: "cockpit-config"
+        # A volumeMount can only reference a volume declared here. Declaring it
+        # resolves the error.
+        #
+        # persistence.enabled=true  -> PVC, survives pod restart AND recreation.
+        # persistence.enabled=false -> emptyDir, so the deployment still applies,
+        #   but config is LOST when the pod is recreated (emptyDir only survives
+        #   a container restart within the same pod). Use this only if a PVC is
+        #   not available to you yet.
+        # ---------------------------------------------------------------------
+        - name: cockpit-config
+        {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.app.name }}-config
+        {{- else }}
+          emptyDir: {}
+        {{- end }}
+      serviceAccountName: sts-ap25701-application
+      securityContext:
+        runAsUser: {{ .Values.deployment.securityContext.runAsUser }}
+        # fsGroup makes the mounted volume group-writable for the app user.
+        # It is already set in your chart — keep it, or the app still cannot
+        # write into /data/config even though the volume is mounted.
+        fsGroup: {{ .Values.deployment.securityContext.fsGroup }}
+      imagePullSecrets:
+        - name: secret-{{ .Values.deployment.containers.registry_ecosystem }}
